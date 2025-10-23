@@ -1,0 +1,534 @@
+grammar:
+bool =
+    "#t"
+    | "#f"
+
+fixnum =
+    { digit }
+
+flonum =
+    { digit } "."
+    | { digit } "." { digit }
+
+ident =
+    [ alpha | identsym ] { identchar }
+    
+atom =
+    number
+    | identifier
+
+sexpr =
+    atom
+    | "(" sexpr ")"
+
+typedef struct {
+    enum { VARIABLE, LITERAL, CALL, LAMBDA, IF, ASSIGNMENT } type;
+    union {
+
+    } val;
+} Sexpr;
+
+cmp:
+#include <stdio.h>
+#include <stdbool.h>
+#include <math.h>
+#include <ctype.h>
+#include "constants.h"
+#include "syntax_types.h"
+
+bool valid_fixnum(u_int32_t x) {
+    const int bits = WORD_SIZE * 8 - FX_SHIFT;
+    const int lower =  -pow(2, bits - 1);
+    const int upper = pow(2, bits - 1) - 1;
+    const int s_x = (int)x;
+
+    return lower <= s_x && s_x <= upper;
+}
+
+u_int32_t immediate_rep(struct Imm *imm) {
+    switch (imm->type) {
+        case FIXNUM:
+            return valid_fixnum(imm->val) ? imm->val << FX_SHIFT : -1;
+        case BOOL:
+            return imm->val ? BOOL_T : BOOL_F;
+        case CHAR:
+            return isascii(imm->val) ? (imm->val << CHAR_SHIFT) + CHAR_TAG : -1;
+        case NIL:
+            return NIL_BITS;
+        default:
+            return -1;
+    }
+}
+
+void emit_imm(FILE *out, struct Imm *imm) {
+    u_int32_t res = immediate_rep(imm);
+    if (res != -1) {
+        fprintf(out, "\tmov\tw0, #%d", res);
+    } else {
+        fprintf(stderr, "Cannot find valid representation for immediate value: %X\n", imm->val);
+        exit(1);
+    }
+}
+
+void emit_expr(FILE *out, u_int32_t stack_index, struct Expr *expr) {
+    switch (expr->type) {
+        case IMM:
+            emit_imm(out, expr->val.imm);
+            break;
+        case PRIMCALL:
+            //emit_primcall(out, expr->val.primcall, stack_index);
+            break;
+        default:
+            fputs(stderr, "Invalid expression type\n");
+            exit(1);
+    }
+}
+
+int main(int argc, char* argv[]) {
+    FILE *out = fopen("assembly.s", "w");
+
+    // Header
+    fputs(out, "\t.section\t__TEXT,__text,regular,pure_instructions\n");
+    fputs(out, "\t.build_version macos, 15, 0\tsdk_version 15, 5\n");
+    fputs(out, "\t.globl _entry\n");
+    fputs(out, "\t.p2align\t2\n");
+    fputs(out, "_entry:\n");
+
+    // Expression
+    
+
+    // Footer
+    fputs(out, "\tret\n");
+    fputs(out, ".subsections_via_symbols\n");
+
+    fclose(out);
+    return 0;
+}
+
+oldparser:
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <string.h>
+#include <math.h>
+#include <ctype.h>
+#include "constants.h"
+
+#define MAXLEN 4095
+
+struct Atom {
+    enum {
+        FIXNUM, FLONUM, CHARACTER, IDENTIFIER, STRING, EMPTY_ATOM = -1
+    } type;
+    union {
+        int32_t fixnum;
+        double *flonum;
+        char character;
+        char *identifier;
+        char *string;
+    } val;
+};
+
+struct Sexpr_List;
+
+struct Sexpr {
+    enum { ATOM, SEXPR, EMPTY_SEXPR = -1 } type;
+    union {
+        struct Atom *atom;
+        struct Sexpr_List *sexprs;
+    } val;
+};
+
+struct Sexpr_Node {
+    struct Sexpr *car;
+    struct Sexpr_Node *cdr;
+};
+
+struct Sexpr_List {
+    struct Sexpr_Node *head;
+    struct Sexpr_Node *tail;
+};
+
+void init_sexpr_list(struct Sexpr_List **list) {
+    if (list) {
+        *list = malloc(sizeof(**list));
+        if (*list) {
+            (*list)->head = NULL;
+            (*list)->tail = NULL;
+        }
+    }
+}
+
+int sexpr_list_append(struct Sexpr_List *list, struct Sexpr *sexpr) {
+    if (list && sexpr) {
+        struct Sexpr_Node *new_node = malloc(sizeof(*new_node));
+        if (!new_node) return -1;
+        new_node->car = sexpr;
+        new_node->cdr = NULL;
+        
+        if (list->head == NULL) {
+            list->head = new_node;
+            list->tail = list->head;
+            return 0;
+        }
+
+        list->tail->cdr = new_node;
+        list->tail = list->tail->cdr;
+    }
+
+    return -1;
+}
+
+void destroy_sexpr_list(struct Sexpr_List **list) {
+    if (list && *list) {
+        struct Sexpr_Node *curr = (*list)->head;
+        for (; curr != NULL; curr = curr->cdr)
+            free(curr->car);
+        free(*list);
+        *list = NULL;
+    }
+}
+
+void init_atom(struct Atom **atom) {
+    if (atom) {
+        *atom = malloc(sizeof(**atom));
+        if (*atom) {
+            memset(*atom, 0, sizeof(**atom));
+            (*atom)->type = EMPTY_ATOM;
+        }
+    }
+}
+
+void destroy_atom(struct Atom **atom) {
+    if (atom && *atom) {
+        switch((*atom)->type) {
+            case FLONUM: case IDENTIFIER: case STRING:
+                free((*atom)->val.string); break;
+            default: break;
+        }
+        free(*atom);
+        *atom = NULL;
+    }
+}
+
+void init_sexpr(struct Sexpr **sexpr) {
+    if (sexpr) {
+        *sexpr = malloc(sizeof(**sexpr));
+        if (*sexpr) {
+            memset(*sexpr, 0, sizeof(**sexpr));
+            (*sexpr)->type = EMPTY_SEXPR;
+        }
+    }
+}
+
+void destroy_sexpr(struct Sexpr **sexpr) {
+    if (sexpr && *sexpr) {
+        switch ((*sexpr)->type) {
+            case ATOM:
+                destroy_atom(&(*sexpr)->val.atom); break;
+            case SEXPR:
+                destroy_sexpr_list(&(*sexpr)->val.sexprs); break;
+            default: break;
+        }
+        free(*sexpr);
+        *sexpr = NULL;
+    }
+}
+
+bool valid_fixnum(long x) {
+    const long bits = WORD_SIZE * 8 - FX_SHIFT;
+    const long lower =  -pow(2, bits - 1);
+    const long upper = pow(2, bits - 1) - 1;
+
+    return lower <= x && x <= upper;
+}
+
+int parse_fixnum(int32_t *out, char *in, int base) {
+    if (out && in != NULL &&
+        in[0] != '\0' &&!isspace((unsigned char)in[0])) {
+        char *end;
+        long n = strtol(in, &end, base);
+
+        if (*end == '\0' && valid_fixnum(n)) {
+            *out = n; return 0;
+        }
+    }
+
+    return -1;
+}
+
+int parse_flonum(double *out, char *in) {
+    if (out && in &&
+        in[0] != '\0' && !isspace((unsigned char) in[0])) {
+        char *end;
+        double n = strtod(in, &end);
+
+        if (*end == '\0') {
+            *out = n; return 0;
+        }
+    }
+
+    return -1;
+}
+
+int parse_char(char *out, char *in) {
+    if (out && in) {
+        if (in[0] == '#' && in[1] == '\\') {
+            unsigned char c = (unsigned char) in[2];
+            char *names[] = {
+                "backspace", "rubout", "newline", "linefeed", 
+                "return", "page", "space", "tab", NULL
+            };
+            char *vals = "\b\b\n\n\r\f \t";
+
+            for (int i = 0; names[i] != NULL; i++) {
+                if (strncmp(in + 2, names[i], 10) == 0) {
+                    *out = vals[i]; return 0;
+                }
+            }
+
+            if (!isspace(c) && (isalnum(c) || isprint(c))) {
+                *out = in[2]; return 0;
+            }
+        }
+    }
+
+    return -1;
+}
+
+bool is_identchar(char c) {
+    char *ext = "!$%&*+-./:<=>\?@^_~";
+
+    if (isalnum((unsigned char) c)) return true;
+
+    for (char *i = ext; *i != '\0'; i++)
+        if (c == *i) return true;
+        
+    return false;
+}
+
+int parse_identifier(char *out, char *in) {
+    if (out && in &&
+        !isdigit((unsigned char) in[0])) {
+        int i = 0;
+
+        while (in[i] != '\0' && i < MAXLEN) {
+            if (!is_identchar(in[i])) {
+                out[0] = '\0'; return -1;
+            }
+            out[i] = in[i];
+            i++;
+        }
+
+        out[i] = '\0';
+        return 0;
+    }
+
+    return -1;
+}
+
+// TODO: Fix for nested values
+int parse_between(char *out, char *in, char start, char end) {
+    if (out && in && in[0] == start) {
+        int len = 0;
+        while (in[1 + len++] != '\0')
+            if (len > MAXLEN) return -1;
+        
+        if (in[len - 1] == end) {
+            for (int i = 0; i < len - 1; i++)
+                out[i - 1] = in[i];
+            return 0;
+        }
+        out[0] = '\0';
+    }
+    
+    return -1;
+}
+
+int parse_atom(struct Atom *out, char *in) {
+    if (out && in) {
+        if (parse_fixnum(&out->val.fixnum, in, 10) == 0) {
+            out->type = FIXNUM; return 0;
+        }
+
+        out->val.flonum = malloc(sizeof(double));
+        if (parse_flonum(out->val.flonum, in) == 0) {
+            out->type = FLONUM; return 0;
+        }
+        free(out->val.flonum);
+        out->val.flonum = NULL;
+
+        // TODO: radix prefix for numbers
+
+        if (parse_char(&out->val.character, in) == 0) {
+            out->type = CHARACTER; return 0;
+        }
+
+        out->val.identifier = malloc(strnlen(in, MAXLEN) + 1);
+        if (parse_identifier(out->val.identifier, in) == 0) {
+            out->type = IDENTIFIER; return 0;
+        }
+
+        out->val.string = out->val.identifier; // can reuse
+        if (parse_between(out->val.string, in, '\"', '\"') == 0) {
+            out->type = STRING; return 0;
+        }
+        free(out->val.string);
+        out->val.string = NULL;
+    }
+
+   return -1;
+}
+
+
+int parse_sexpr(struct Sexpr *out, char *in) {
+    struct Atom *atom;
+    size_t len = strnlen(in, MAXLEN) - 1;
+    char *vals = malloc(len);
+
+    init_atom(&atom);
+
+    if (parse_atom(atom, in) == 0) {
+        out->type = ATOM;
+        out->val.atom = atom;
+        return 0;
+    }
+
+    if (parse_between(vals, in, '(', ')') == 0) {
+        int i = 0, j = 0, in_str = 0;
+        char *buf = malloc(len);
+        if (!buf) return -1;
+        out->val.sexprs = malloc(sizeof(*(out->val.sexprs)));
+        if (!out->val.sexprs) return -1;
+
+        while (i <= len) { // TODO: Fix for nested strings and parens
+            switch (vals[i]) {
+                case ' ': case '\0':
+                    if (!in_str) {
+                        struct Sexpr *curr;
+                        buf[j] = '\0';
+                        j = 0;
+                        printf("%s\n", buf);
+
+                        init_sexpr(&curr);
+                        parse_sexpr(curr, buf);
+                        sexpr_list_append(out->val.sexprs, curr);
+                    } else {
+                        buf[j++] = vals[i];
+                    }
+                    break;
+                case '\"':
+                    in_str ^= -1;
+                    buf[j++] = vals[i];
+                    break;
+                default:
+                    buf[j++] = vals[i];
+                    break;
+            }
+
+            if (vals[i++] == '\0') { break; }
+        }
+
+        out->type = SEXPR;
+        return 0;
+    }
+
+    return -1;
+}
+
+void print_atom(struct Atom *atom) {
+    if (atom) {
+        switch (atom->type) {
+            case FIXNUM:
+                printf("%d\n", atom->val.fixnum);
+                break;
+            case FLONUM:
+                printf("%f\n", *(atom->val.flonum));
+                break;
+            case CHARACTER:
+                printf("%c\n", atom->val.character);
+                break;
+            case IDENTIFIER:
+                printf("%s\n", atom->val.identifier);
+                break;
+            case STRING:
+                printf("\"%s\"\n", atom->val.string);
+                break;
+            default: break;
+        }
+    }
+}
+
+void print_sexpr(struct Sexpr *sexpr) {
+    switch (sexpr->type) {
+        case ATOM: print_atom(sexpr->val.atom); break;
+        case SEXPR:
+            for (struct Sexpr_Node *i = sexpr->val.sexprs->head; i != NULL; i = i->cdr) {
+                print_sexpr(i->car);
+            }
+            break;
+        default: break;
+    }
+}
+
+int main(void) {
+    /*struct Atom *atom;
+    init_atom(&atom);
+    parse_atom(atom, "(asdf)");
+    printf("%d\n%s\n", atom->type, atom->val.identifier);
+    destroy_atom(&atom);*/
+
+    struct Sexpr *sexpr;
+    init_sexpr(&sexpr);
+    parse_sexpr(sexpr, "(lambda (a b) (+ a b))");
+    print_sexpr(sexpr);
+    destroy_sexpr(&sexpr);
+    return 0;
+}
+
+runtime:
+#include <stdio.h>
+#include "constants.h"
+
+typedef unsigned int ptr;
+
+int entry(void);
+
+static void print_ptr(ptr x) {
+  if ((x & FX_MASK) == FX_TAG) {
+    printf("%d", ((int)x) >> FX_SHIFT);
+  } else if (x == BOOL_F) {
+    printf("#f");
+  } else if (x == BOOL_T) {
+    printf("#t");
+  } else if ((x & CONST_MASK) == CHAR_TAG) {
+    printf("%c", ((int)x) >> CHAR_SHIFT);
+  } else if (x == NIL_BITS) {
+    printf("()");
+  } else {
+    printf("<unknown 0x%08x>", x);
+  }
+  printf("\n");
+}
+
+int main(void) {
+  print_ptr(entry());
+  return 0;
+}
+
+constants:
+#ifndef _CONSTANTS_H
+#define _CONSTANTS_H
+
+#define WORD_SIZE       4
+#define FX_MASK         0x03
+#define FX_TAG          0x00
+#define FX_SHIFT           2
+#define BOOL_F          0x2f
+#define BOOL_T          0x6f
+#define CONST_MASK      0xFF
+#define CHAR_TAG        0x0F
+#define CHAR_SHIFT         8
+#define NIL_BITS         0x4f
+
+#endif

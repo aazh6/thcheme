@@ -5,6 +5,20 @@
     },
     "files.associations": {
         "stdio.h": "c",
-        "constants.h": "c"
+        "constants.h": "c",
+        "__locale": "c",
+        "deque": "c",
+        "ios": "c",
+        "limits": "c",
+        "locale": "c",
+        "new": "c",
+        "string": "c",
+        "variant": "c",
+        "stdbool.h": "c",
+        "string.h": "c",
+        "stdlib.h": "c",
+        "math.h": "c",
+        "ctype.h": "c",
+        "dystr.h": "c"
     }
 }
